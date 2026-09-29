@@ -1,3 +1,5 @@
+import ast
+import json
 import re
 import sys
 from typing import List, Dict, Optional, Tuple, Set
@@ -74,6 +76,147 @@ def dpll(cnf: List[List[int]], assignment: Optional[Dict[int, int]] = None, all_
         return True, model
 
     return dpll(simplify(cnf, -branch), {**assignment, branch: 0}, all_vars)
+
+
+def format_solution(sat: bool, model: Optional[Dict[int, int]] = None) -> str:
+    return "SAT" if sat else "UNSAT"
+
+
+def solve_cnf(cnf: List[List[int]]) -> str:
+    sat, model = dpll(cnf)
+    return format_solution(sat, model)
+
+
+def parse_cnf(raw: str) -> List[List[int]]:
+    raw = raw.strip()
+    if not raw:
+        return []
+
+    try:
+        data = ast.literal_eval(raw)
+        if isinstance(data, list):
+            return [[int(lit) for lit in clause] for clause in data]
+    except Exception:
+        pass
+
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return [[int(lit) for lit in clause] for clause in data]
+    except Exception:
+        pass
+
+    clause_matches = re.findall(r"\[([^\[\]]*)\]", raw)
+    if clause_matches:
+        clauses = []
+        for cm in clause_matches:
+            lits = [int(x) for x in re.findall(r"-?\d+", cm)]
+            clauses.append(lits)
+        return clauses
+
+    clauses = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("c") or line.startswith("p") or line.startswith("%") or line == "0":
+            continue
+        lits = [int(x) for x in line.split() if x != "0"]
+        if lits:
+            clauses.append(lits)
+    return clauses
+
+
+def is_pure_sat(raw: str) -> bool:
+    raw = raw.strip()
+    if not raw:
+        return False
+
+    if raw.startswith("["):
+        try:
+            data = ast.literal_eval(raw)
+            if isinstance(data, list):
+                if not data:
+                    return True
+                if all(isinstance(x, list) and all(isinstance(y, int) for y in x) for x in data):
+                    return True
+                if all(isinstance(f, list) and all(isinstance(c, list) and all(isinstance(y, int) for y in c) for c in f) for f in data):
+                    return True
+        except Exception:
+            pass
+
+    non_empty = [l.strip() for l in raw.splitlines() if l.strip()]
+    if any(l.startswith("p cnf") for l in non_empty):
+        return True
+
+    bracket_matches = re.findall(r"\[([^\[\]]*)\]", raw)
+    if bracket_matches and not any(re.search(r"[a-zA-Z_=<>!]", b) for b in bracket_matches):
+        return True
+
+    all_num_lines = True
+    has_clauses = False
+    for l in non_empty:
+        if l.startswith("c") or l.startswith("%"):
+            continue
+        parts = l.split()
+        if not parts:
+            continue
+        try:
+            [int(x) for x in parts]
+            has_clauses = True
+        except ValueError:
+            all_num_lines = False
+            break
+
+    return all_num_lines and has_clauses
+
+
+def solve_sat(raw: str):
+    try:
+        data = ast.literal_eval(raw.strip())
+        if isinstance(data, list):
+            if data and isinstance(data[0], list) and data[0] and isinstance(data[0][0], list):
+                for formula in data:
+                    print(solve_cnf(formula))
+                return
+            print(solve_cnf(data))
+            return
+    except Exception:
+        pass
+
+    try:
+        data = json.loads(raw.strip())
+        if isinstance(data, list):
+            if data and isinstance(data[0], list) and data[0] and isinstance(data[0][0], list):
+                for formula in data:
+                    print(solve_cnf(formula))
+                return
+            print(solve_cnf(data))
+            return
+    except Exception:
+        pass
+
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if lines and all(line.startswith("[") for line in lines) and len(lines) > 1:
+        parsed_lines = []
+        all_lines_parsed = True
+        for line in lines:
+            try:
+                c = parse_cnf(line)
+                if c:
+                    parsed_lines.append(c)
+                else:
+                    all_lines_parsed = False
+                    break
+            except Exception:
+                all_lines_parsed = False
+                break
+
+        if all_lines_parsed and len(parsed_lines) > 1:
+            for c in parsed_lines:
+                print(solve_cnf(c))
+            return
+
+    cnf = parse_cnf(raw)
+    print(solve_cnf(cnf))
 
 
 class BitBlaster:
@@ -167,6 +310,10 @@ class BitBlaster:
             self.add_clause([-a[i], b[i]])
             self.add_clause([a[i], -b[i]])
 
+    def assert_not_equal(self, a: List[int], b: List[int]):
+        diffs = [self.xor_gate(a[i], b[i]) for i in range(self.width)]
+        self.add_clause(diffs)
+
     def assert_less_than(self, a: List[int], b: List[int]):
         carry = self.TRUE
         for i in range(self.width):
@@ -179,18 +326,60 @@ class BitBlaster:
     def assert_greater_than(self, a: List[int], b: List[int]):
         self.assert_less_than(b, a)
 
+    def assert_less_or_equal(self, a: List[int], b: List[int]):
+        carry = self.TRUE
+        for i in range(self.width):
+            term1 = self.and_gate(b[i], -a[i])
+            term2 = self.xor_gate(b[i], -a[i])
+            term3 = self.and_gate(carry, term2)
+            carry = self.or_gate(term1, term3)
+        self.add_clause([carry])
+
+    def assert_greater_or_equal(self, a: List[int], b: List[int]):
+        self.assert_less_or_equal(b, a)
+
+    def assert_relation(self, rel_op: str, a: List[int], b: List[int], is_positive: bool = True):
+        if is_positive:
+            if rel_op in ["=", "=="]:
+                self.assert_equal(a, b)
+            elif rel_op == "!=":
+                self.assert_not_equal(a, b)
+            elif rel_op == "<":
+                self.assert_less_than(a, b)
+            elif rel_op == ">":
+                self.assert_greater_than(a, b)
+            elif rel_op == "<=":
+                self.assert_less_or_equal(a, b)
+            elif rel_op == ">=":
+                self.assert_greater_or_equal(a, b)
+        else:
+            if rel_op in ["=", "=="]:
+                self.assert_not_equal(a, b)
+            elif rel_op == "!=":
+                self.assert_equal(a, b)
+            elif rel_op == "<":
+                self.assert_greater_or_equal(a, b)
+            elif rel_op == ">":
+                self.assert_less_or_equal(a, b)
+            elif rel_op == "<=":
+                self.assert_greater_than(a, b)
+            elif rel_op == ">=":
+                self.assert_less_than(a, b)
+
 
 class Parser:
     def __init__(self, blaster: BitBlaster):
         self.bb = blaster
 
-    def tokenize(self, text: str) -> List[str]:
-        specials = ["==", "=", "<=", ">=", "<", ">", "!=", "(", ")", "~", "^", "&", "|", "+", "-"]
+    @staticmethod
+    def tokenize(text: str) -> List[str]:
+        specials = ["==", "!=", "<=", ">=", "=", "<", ">", "(", ")", "~", "^", "&", "|", "+", "-"]
         pattern = "|".join(re.escape(s) for s in sorted(specials, key=len, reverse=True))
         pattern += r"|[a-zA-Z_][a-zA-Z0-9_]*|\d+"
         return re.findall(pattern, text)
 
-    def find_op(self, tokens: List[str], ops: List[str]) -> int:
+    @staticmethod
+    def find_op(tokens: List[str], ops: List[str]) -> int:
         depth = 0
         for i in reversed(range(len(tokens))):
             tok = tokens[i]
@@ -202,7 +391,8 @@ class Parser:
                 return i
         return -1
 
-    def strip_parens(self, tokens: List[str]) -> List[str]:
+    @staticmethod
+    def strip_parens(tokens: List[str]) -> List[str]:
         while tokens and tokens[0] == "(" and tokens[-1] == ")":
             depth = 0
             encloses = True
@@ -219,26 +409,6 @@ class Parser:
             else:
                 break
         return tokens
-
-    def parse_constraint(self, text: str):
-        tokens = self.tokenize(text)
-        if not tokens:
-            return
-
-        rel_idx = self.find_op(tokens, ["=", "==", "<", ">"])
-        if rel_idx == -1:
-            return
-
-        rel_op = tokens[rel_idx]
-        left_val = self.eval_expr(tokens[:rel_idx])
-        right_val = self.eval_expr(tokens[rel_idx + 1:])
-
-        if rel_op in ["=", "=="]:
-            self.bb.assert_equal(left_val, right_val)
-        elif rel_op == "<":
-            self.bb.assert_less_than(left_val, right_val)
-        elif rel_op == ">":
-            self.bb.assert_greater_than(left_val, right_val)
 
     def eval_expr(self, tokens: List[str]) -> List[int]:
         tokens = self.strip_parens(tokens)
@@ -275,13 +445,98 @@ class Parser:
         return self.bb.constant(0)
 
 
-def solve(raw_input: str):
+def split_top_level(text: str, delimiter_regex: str) -> List[str]:
+    parts = []
+    current = []
+    depth = 0
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == "(":
+            depth += 1
+            current.append(c)
+            i += 1
+        elif c == ")":
+            depth -= 1
+            current.append(c)
+            i += 1
+        elif depth == 0:
+            m = re.match(delimiter_regex, text[i:], re.IGNORECASE)
+            if m:
+                parts.append("".join(current).strip())
+                current = []
+                i += len(m.group(0))
+            else:
+                current.append(c)
+                i += 1
+        else:
+            current.append(c)
+            i += 1
+    if current:
+        parts.append("".join(current).strip())
+    return [p for p in parts if p]
+
+
+def parse_atom(atom_text: str, atom_registry: Dict[str, int], var_to_atom: Dict[int, Tuple[str, List[str], List[str]]]) -> int:
+    atom_text = atom_text.strip()
+    is_neg = False
+    while True:
+        if atom_text.startswith("not ") or atom_text.startswith("NOT "):
+            is_neg = not is_neg
+            atom_text = atom_text[4:].strip()
+        elif atom_text.startswith("~") or atom_text.startswith("!"):
+            is_neg = not is_neg
+            atom_text = atom_text[1:].strip()
+        elif atom_text.startswith("(") and atom_text.endswith(")"):
+            depth = 0
+            encloses = True
+            for i in range(len(atom_text) - 1):
+                if atom_text[i] == "(":
+                    depth += 1
+                elif atom_text[i] == ")":
+                    depth -= 1
+                if depth == 0:
+                    encloses = False
+                    break
+            if encloses:
+                atom_text = atom_text[1:-1].strip()
+            else:
+                break
+        else:
+            break
+
+    tokens = Parser.tokenize(atom_text)
+    rel_idx = Parser.find_op(tokens, ["<=", ">=", "==", "!=", "=", "<", ">"])
+    if rel_idx != -1:
+        rel_op = tokens[rel_idx]
+        if rel_op == "=":
+            rel_op = "=="
+        left_tokens = tokens[:rel_idx]
+        right_tokens = tokens[rel_idx + 1:]
+        canonical_key = " ".join(left_tokens) + " " + rel_op + " " + " ".join(right_tokens)
+        if canonical_key not in atom_registry:
+            var_id = len(atom_registry) + 1
+            atom_registry[canonical_key] = var_id
+            var_to_atom[var_id] = (rel_op, left_tokens, right_tokens)
+        var_id = atom_registry[canonical_key]
+        return -var_id if is_neg else var_id
+    else:
+        canonical_key = " ".join(tokens)
+        if canonical_key not in atom_registry:
+            var_id = len(atom_registry) + 1
+            atom_registry[canonical_key] = var_id
+            var_to_atom[var_id] = ("==", tokens, ["1"])
+        var_id = atom_registry[canonical_key]
+        return -var_id if is_neg else var_id
+
+
+def solve_smt(raw_input: str):
     lines = [line.strip() for line in raw_input.strip().splitlines() if line.strip()]
     if not lines:
         return
 
     width = 2
-    constraint_lines = []
+    raw_constraints = []
 
     for line in lines:
         if line.isdigit():
@@ -291,7 +546,7 @@ def solve(raw_input: str):
             if m:
                 width = int(m.group(1))
         else:
-            constraint_lines.append(line)
+            raw_constraints.append(line)
 
     if not any(l.isdigit() for l in lines):
         all_nums = [int(n) for n in re.findall(r"\b\d+\b", raw_input)]
@@ -299,39 +554,90 @@ def solve(raw_input: str):
             max_num = max(all_nums)
             width = max(width, max_num.bit_length())
 
-    blaster = BitBlaster(width)
-    parser = Parser(blaster)
+    atom_registry: Dict[str, int] = {}
+    var_to_atom: Dict[int, Tuple[str, List[str], List[str]]] = {}
+    cnf: List[List[int]] = []
 
-    for cline in constraint_lines:
-        for sub in re.split(r"[;\n]", cline):
-            if sub.strip():
-                parser.parse_constraint(sub.strip())
+    for cline in raw_constraints:
+        sub_constrs = cline.split(";")
+        for sub in sub_constrs:
+            sub = sub.strip()
+            if not sub:
+                continue
+            and_parts = split_top_level(sub, r"^\s*(?:and|&&)\b\s*")
+            for and_p in and_parts:
+                or_parts = split_top_level(and_p, r"^\s*(?:or|\|\|)\b\s*")
+                clause = []
+                for or_p in or_parts:
+                    lit = parse_atom(or_p, atom_registry, var_to_atom)
+                    clause.append(lit)
+                if clause:
+                    cnf.append(clause)
 
-    sat, model = dpll(blaster.clauses)
-
-    if not sat or model is None:
-        print("UNSAT")
+    if not cnf:
+        print("SAT")
         return
 
-    print("SAT")
+    # DPLL(T) architecture:
+    # 1. First, check Boolean satisfiability with the SAT solver (DPLL) before theory solving!
+    while True:
+        sat, bool_model = dpll(cnf)
+        if not sat or bool_model is None:
+            print("UNSAT")
+            return
 
-    results = []
-    for name in sorted(blaster.variables.keys()):
-        bits = blaster.variables[name]
-        bit_chars = []
-        for b in reversed(bits):
-            if b == blaster.TRUE:
-                val = 1
-            elif b == -blaster.TRUE:
-                val = 0
-            else:
-                val = model.get(abs(b), 0)
-                if b < 0:
-                    val = 1 - val
-            bit_chars.append(str(val))
-        results.append(f"{name} = {''.join(bit_chars)}")
+        # 2. Theory check with BitBlaster
+        blaster = BitBlaster(width)
+        parser = Parser(blaster)
 
-    sys.stderr.write(", ".join(results) + "\n")
+        active_vars = []
+        theory_ok = True
+        for var_id, atom_info in var_to_atom.items():
+            val = bool_model.get(var_id, 0)
+            is_pos = (val == 1)
+            active_vars.append(var_id if is_pos else -var_id)
+            rel_op, left_tokens, right_tokens = atom_info
+            try:
+                left_val = parser.eval_expr(left_tokens)
+                right_val = parser.eval_expr(right_tokens)
+                blaster.assert_relation(rel_op, left_val, right_val, is_positive=is_pos)
+            except Exception:
+                theory_ok = False
+                break
+
+        if theory_ok:
+            theory_sat, theory_model = dpll(blaster.clauses)
+            if theory_sat and theory_model is not None:
+                print("SAT")
+                results = []
+                for name in sorted(blaster.variables.keys()):
+                    bits = blaster.variables[name]
+                    bit_chars = []
+                    for b in reversed(bits):
+                        if b == blaster.TRUE:
+                            v = 1
+                        elif b == -blaster.TRUE:
+                            v = 0
+                        else:
+                            v = theory_model.get(abs(b), 0)
+                            if b < 0:
+                                v = 1 - v
+                        bit_chars.append(str(v))
+                    results.append(f"{name} = {''.join(bit_chars)}")
+                if results:
+                    sys.stderr.write(", ".join(results) + "\n")
+                return
+
+        # If theory assignment is inconsistent, learn conflict clause and repeat DPLL
+        conflict = [-lit for lit in active_vars]
+        cnf.append(conflict)
+
+
+def solve(raw_input: str):
+    if is_pure_sat(raw_input):
+        solve_sat(raw_input)
+    else:
+        solve_smt(raw_input)
 
 
 def main():
