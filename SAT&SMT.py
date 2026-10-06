@@ -138,30 +138,6 @@ class BitBlaster:
     def b_xor(self, a: List[int], b: List[int]) -> List[int]:
         return [self.xor_gate(a[i], b[i]) for i in range(self.width)]
 
-    def b_add(self, a: List[int], b: List[int]) -> List[int]:
-        res = []
-        carry = -self.TRUE
-        for i in range(self.width):
-            t1 = self.xor_gate(a[i], b[i])
-            z = self.xor_gate(t1, carry)
-            res.append(z)
-            c1 = self.and_gate(a[i], b[i])
-            c2 = self.and_gate(carry, t1)
-            carry = self.or_gate(c1, c2)
-        return res
-
-    def b_sub(self, a: List[int], b: List[int]) -> List[int]:
-        res = []
-        carry = self.TRUE
-        for i in range(self.width):
-            t1 = self.xor_gate(a[i], -b[i])
-            z = self.xor_gate(t1, carry)
-            res.append(z)
-            c1 = self.and_gate(a[i], -b[i])
-            c2 = self.and_gate(carry, t1)
-            carry = self.or_gate(c1, c2)
-        return res
-
     def assert_equal(self, a: List[int], b: List[int]):
         for i in range(self.width):
             self.add_clause([-a[i], b[i]])
@@ -190,48 +166,27 @@ class Parser:
         pattern += r"|[a-zA-Z_][a-zA-Z0-9_]*|\d+"
         return re.findall(pattern, text)
 
-    def find_op(self, tokens: List[str], ops: List[str]) -> int:
-        depth = 0
-        for i in reversed(range(len(tokens))):
-            tok = tokens[i]
-            if tok == ")":
-                depth += 1
-            elif tok == "(":
-                depth -= 1
-            elif depth == 0 and tok in ops:
-                return i
-        return -1
-
-    def strip_parens(self, tokens: List[str]) -> List[str]:
-        while tokens and tokens[0] == "(" and tokens[-1] == ")":
-            depth = 0
-            encloses = True
-            for i in range(len(tokens) - 1):
-                if tokens[i] == "(":
-                    depth += 1
-                elif tokens[i] == ")":
-                    depth -= 1
-                if depth == 0:
-                    encloses = False
-                    break
-            if encloses:
-                tokens = tokens[1:-1]
-            else:
-                break
-        return tokens
-
     def parse_constraint(self, text: str):
         tokens = self.tokenize(text)
         if not tokens:
             return
 
-        rel_idx = self.find_op(tokens, ["=", "==", "<", ">"])
-        if rel_idx == -1:
+        rel_idx = -1
+        rel_op = None
+        for i, tok in enumerate(tokens):
+            if tok in ["=", "==", "<", ">"]:
+                rel_idx = i
+                rel_op = tok
+                break
+
+        if rel_op is None:
             return
 
-        rel_op = tokens[rel_idx]
-        left_val = self.eval_expr(tokens[:rel_idx])
-        right_val = self.eval_expr(tokens[rel_idx + 1:])
+        left_tokens = tokens[:rel_idx]
+        right_tokens = tokens[rel_idx + 1:]
+
+        left_val = self.eval_expr(left_tokens)
+        right_val = self.eval_expr(right_tokens)
 
         if rel_op in ["=", "=="]:
             self.bb.assert_equal(left_val, right_val)
@@ -241,29 +196,22 @@ class Parser:
             self.bb.assert_greater_than(left_val, right_val)
 
     def eval_expr(self, tokens: List[str]) -> List[int]:
-        tokens = self.strip_parens(tokens)
-        if not tokens:
-            return self.bb.constant(0)
+        for op in ["OR", "|"]:
+            if op in tokens:
+                idx = tokens.index(op)
+                return self.bb.b_or(self.eval_expr(tokens[:idx]), self.eval_expr(tokens[idx + 1:]))
 
-        idx = self.find_op(tokens, ["OR", "|"])
-        if idx != -1:
-            return self.bb.b_or(self.eval_expr(tokens[:idx]), self.eval_expr(tokens[idx + 1:]))
+        for op in ["XOR", "^"]:
+            if op in tokens:
+                idx = tokens.index(op)
+                return self.bb.b_xor(self.eval_expr(tokens[:idx]), self.eval_expr(tokens[idx + 1:]))
 
-        idx = self.find_op(tokens, ["XOR", "^"])
-        if idx != -1:
-            return self.bb.b_xor(self.eval_expr(tokens[:idx]), self.eval_expr(tokens[idx + 1:]))
+        for op in ["AND", "&"]:
+            if op in tokens:
+                idx = tokens.index(op)
+                return self.bb.b_and(self.eval_expr(tokens[:idx]), self.eval_expr(tokens[idx + 1:]))
 
-        idx = self.find_op(tokens, ["AND", "&"])
-        if idx != -1:
-            return self.bb.b_and(self.eval_expr(tokens[:idx]), self.eval_expr(tokens[idx + 1:]))
-
-        idx = self.find_op(tokens, ["+", "-"])
-        if idx != -1:
-            if tokens[idx] == "+":
-                return self.bb.b_add(self.eval_expr(tokens[:idx]), self.eval_expr(tokens[idx + 1:]))
-            return self.bb.b_sub(self.eval_expr(tokens[:idx]), self.eval_expr(tokens[idx + 1:]))
-
-        if tokens[0] in ["NOT", "~"]:
+        if tokens and tokens[0] in ["NOT", "~"]:
             return self.bb.b_not(self.eval_expr(tokens[1:]))
 
         if len(tokens) == 1:
@@ -271,6 +219,9 @@ class Parser:
             if tok.isdigit():
                 return self.bb.constant(int(tok))
             return self.bb.get_var(tok)
+
+        if tokens and tokens[0] == "(" and tokens[-1] == ")":
+            return self.eval_expr(tokens[1:-1])
 
         return self.bb.constant(0)
 
