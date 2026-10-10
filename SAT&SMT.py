@@ -1,6 +1,7 @@
 import re
 import sys
 from lark import Lark, Transformer
+from SATSolver import dpll
 
 
 grammar = """
@@ -130,44 +131,6 @@ class Flattening(Transformer):
         self.bb.assert_greater(items[0], items[1])
 
 
-def dpll(cnf, model=None, decision_vars=None):
-    if model is None:
-        model = {}
-
-    while True:
-        if any(len(c) == 0 for c in cnf):
-            return False, None
-
-        unit = next((c[0] for c in cnf if len(c) == 1), None)
-        if unit is None:
-            break
-
-        model[abs(unit)] = 1 if unit > 0 else 0
-        cnf = [[l for l in c if l != -unit] for c in cnf if unit not in c]
-
-    if any(len(c) == 0 for c in cnf):
-        return False, None
-
-    unassigned = [v for v in (decision_vars or []) if v not in model]
-    if not unassigned:
-        if not cnf:
-            return True, model
-        all_vars = set(abs(l) for c in cnf for l in c)
-        unassigned = [v for v in sorted(all_vars) if v not in model]
-        if not unassigned:
-            return True, model
-
-    branch = unassigned[0]
-    for val in [1, 0]:
-        lit = branch if val else -branch
-        next_cnf = [[l for l in c if l != -lit] for c in cnf if lit not in c]
-        sat, res = dpll(next_cnf, {**model, branch: val}, decision_vars)
-        if sat:
-            return True, res
-
-    return False, None
-
-
 def solve(text):
     lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
     if not lines:
@@ -183,9 +146,7 @@ def solve(text):
     tree = parser.parse("\n".join(lines))
     Flattening(bb).transform(tree)
 
-    dec_vars = [b for name in sorted(bb.vars, reverse=True) for b in reversed(bb.vars[name])]
-    sat, model = dpll(bb.clauses, decision_vars=dec_vars)
-
+    sat, model = dpll(bb.clauses)
     if not sat:
         print("UNSAT")
         return
