@@ -7,7 +7,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 # ==========================================
-# 1. DPLL SOLVER (Modulo da 1ª Submissao)
+# 1. DPLL SOLVER
 # ==========================================
 
 def simplify(cnf, literal):
@@ -61,7 +61,7 @@ def dpll(cnf, assignment=None, all_vars=None):
 
 
 # ==========================================
-# 2. BIT-BLASTER (Circuitos Essenciais)
+# 2. BIT-BLASTER
 # ==========================================
 
 class BitBlaster:
@@ -290,7 +290,7 @@ class BitBlastTransformer(Transformer):
     def start(self, items):
         return items
 
-    # Operadores complexos / secundarios nao implementados
+    # Operadores nao implementados
     def div(self, items):
         raise NotImplementedError("Operador de divisão '/' ainda não implementado")
 
@@ -336,10 +336,8 @@ def solve(text: str):
     try:
         tree = parser.parse("\n".join(lines))
         res = transformer.transform(tree)
-    except Exception as e:
-        msg = getattr(e, "orig_exc", e)
-        sys.stderr.write(f"{msg}\n")
-        sys.stderr.flush()
+    except NotImplementedError as e:
+        print(f"ERRO: {e}")
         return
 
     if isinstance(res, list):
