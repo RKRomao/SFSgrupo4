@@ -7,7 +7,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 # ==========================================
-# 1. DPLL SOLVER
+# 1. DPLL SOLVER (Modulo da 1ª Submissao)
 # ==========================================
 
 def simplify(cnf, literal):
@@ -167,17 +167,22 @@ class BitBlaster:
 # ==========================================
 
 grammar = r"""
-    start: (formula [";"])*
+    start: (formula (";"? formula)*)?
 
     ?formula: formula_and
     ?formula_and: formula_and _AND formula_not   -> f_and
                 | formula_not
     ?formula_not: _NOT formula_not               -> f_not
+                | "distinct" "(" term ("," term)* ")" -> distinct
                 | "(" formula ")"
                 | atom
 
-    ?atom: term "<" term                        -> lt
+    ?atom: term "<=" term                        -> le
+         | term ">=" term                        -> ge
+         | term "!=" term                        -> neq
          | term ("=" | "==") term               -> eq
+         | term "<" term                        -> lt
+         | term ">" term                        -> gt
          | term "[" INT "]"                     -> bit_select
          | CNAME                                -> bool_var
 
@@ -244,11 +249,33 @@ class BitBlastTransformer(Transformer):
     def f_not(self, items):
         return -items[0]
 
+    def distinct(self, items):
+        conjs = []
+        for i in range(len(items)):
+            for j in range(i + 1, len(items)):
+                conjs.append(-self.bb.b_eq(items[i], items[j]))
+        res = conjs[0]
+        for c in conjs[1:]:
+            res = self.bb.and_gate(res, c)
+        return res
+
     def lt(self, items):
         return self.bb.b_lt(items[0], items[1])
 
+    def gt(self, items):
+        return self.bb.b_lt(items[1], items[0])
+
     def eq(self, items):
         return self.bb.b_eq(items[0], items[1])
+
+    def neq(self, items):
+        return -self.bb.b_eq(items[0], items[1])
+
+    def le(self, items):
+        return self.bb.b_ge(items[1], items[0])
+
+    def ge(self, items):
+        return self.bb.b_ge(items[0], items[1])
 
     def bit_select(self, items):
         return items[0][int(items[1])]
@@ -290,7 +317,6 @@ class BitBlastTransformer(Transformer):
     def start(self, items):
         return items
 
-    # Operadores nao implementados
     def div(self, items):
         raise NotImplementedError("Operador de divisão '/' ainda não implementado")
 
@@ -318,7 +344,12 @@ parser = Lark(grammar, parser="earley")
 # ==========================================
 
 def solve(text: str):
-    lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
+    raw_lines = text.strip().splitlines()
+    lines = []
+    for l in raw_lines:
+        clean = re.sub(r"(#|//).*$", "", l).strip()
+        if clean:
+            lines.append(clean)
     if not lines:
         return
 
@@ -336,8 +367,10 @@ def solve(text: str):
     try:
         tree = parser.parse("\n".join(lines))
         res = transformer.transform(tree)
-    except NotImplementedError as e:
-        print(f"ERRO: {e}")
+    except Exception as e:
+        msg = getattr(e, "orig_exc", e)
+        sys.stderr.write(f"{msg}\n")
+        sys.stderr.flush()
         return
 
     if isinstance(res, list):

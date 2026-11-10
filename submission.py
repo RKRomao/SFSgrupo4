@@ -1,5 +1,5 @@
-import re
 import sys
+import re
 from dataclasses import dataclass
 from typing import List, NamedTuple, Optional
 
@@ -73,13 +73,19 @@ class Token(NamedTuple):
 
 
 TOKEN_SPEC = [
-    ("SKIP",      r"[ \t\r\n]+"),
+    ("SKIP",      r"[ \t\r\n]+|#[^\n]*|//[^\n]*"),
     ("SHL",       r"<<"),
     ("SHR",       r">>"),
-    ("CONCAT",    r"◦|\+\+"),
+    ("LE",        r"<="),
+    ("GE",        r">="),
+    ("NEQ",       r"!="),
     ("EQ",        r"==|="),
+    ("LT",        r"<"),
+    ("GT",        r">"),
+    ("CONCAT",    r"◦|\+\+"),
     ("AND",       r"∧|/\\|\bAND\b|\band\b"),
     ("NOT",       r"¬|!|\bNOT\b|\bnot\b"),
+    ("DISTINCT",  r"\bdistinct\b"),
     ("PLUS",      r"\+"),
     ("MINUS",     r"−|-"),
     ("MUL",       r"·|\*"),
@@ -88,9 +94,9 @@ TOKEN_SPEC = [
     ("B_AND",     r"&"),
     ("B_OR",      r"\|"),
     ("B_NOT",     r"∼|~"),
-    ("LT",        r"<"),
     ("QUESTION",  r"\?"),
     ("COLON",     r":"),
+    ("COMMA",     r","),
     ("LBRACKET",  r"\["),
     ("RBRACKET",  r"\]"),
     ("LPAREN",    r"\("),
@@ -184,12 +190,26 @@ class Parser:
     def parse_formula_unary(self):
         if self.match("NOT"):
             return FormulaNot(self.parse_formula_unary())
+        if self.match("DISTINCT"):
+            self.expect("LPAREN")
+            terms = [self.parse_term()]
+            while self.match("COMMA"):
+                terms.append(self.parse_term())
+            self.expect("RPAREN")
+            conjs = []
+            for i in range(len(terms)):
+                for j in range(i + 1, len(terms)):
+                    conjs.append(Rel("!=", terms[i], terms[j]))
+            node = conjs[0]
+            for rel in conjs[1:]:
+                node = FormulaAnd(node, rel)
+            return node
         if self.peek() and self.peek().type == "LPAREN":
             saved = self.pos
             self.pos += 1
             try:
                 inner = self.parse_formula()
-                if self.match("RPAREN") and not (self.peek() and self.peek().type in ("LT", "EQ")):
+                if self.match("RPAREN") and not (self.peek() and self.peek().type in ("LE", "GE", "NEQ", "EQ", "LT", "GT")):
                     return inner
             except Exception:
                 pass
@@ -198,9 +218,10 @@ class Parser:
 
     def parse_atom(self):
         left = self.parse_term()
-        rel = self.match("LT", "EQ")
+        rel = self.match("LE", "GE", "NEQ", "EQ", "LT", "GT")
         if rel:
-            return Rel("<" if rel.type == "LT" else "=", left, self.parse_term())
+            op_map = {"LT": "<", "GT": ">", "EQ": "=", "NEQ": "!=", "LE": "<=", "GE": ">="}
+            return Rel(op_map[rel.type], left, self.parse_term())
         return left
 
     def parse_term(self):
@@ -422,7 +443,12 @@ class BitBlaster:
         if isinstance(node, Rel):
             t1 = self.blast_term(node.left)
             t2 = self.blast_term(node.right)
-            return self.b_lt(t1, t2) if node.op == "<" else self.b_eq(t1, t2)
+            if node.op == "<": return self.b_lt(t1, t2)
+            if node.op == ">": return self.b_lt(t2, t1)
+            if node.op in ("=", "=="): return self.b_eq(t1, t2)
+            if node.op == "!=": return -self.b_eq(t1, t2)
+            if node.op == "<=": return self.b_ge(t2, t1)
+            if node.op == ">=": return self.b_ge(t1, t2)
         if isinstance(node, BitSelect):
             t = self.blast_term(node.term)
             return t[node.index]
@@ -457,11 +483,15 @@ class BitBlaster:
 
 
 def solve(text: str):
-    lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
+    raw_lines = text.strip().splitlines()
+    lines = []
+    for l in raw_lines:
+        clean = re.sub(r"(#|//).*$", "", l).strip()
+        if clean:
+            lines.append(clean)
     if not lines:
         return
 
-    # Determinacao da largura em bits (bit 0 e o menos significativo)
     width = 4
     if lines[0].isdigit():
         width, lines = int(lines[0]), lines[1:]
