@@ -6,63 +6,95 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 
-# ==========================================
-# 1. DPLL SOLVER (Modulo da 1ª Submissao)
-# ==========================================
+# ==============================================================================
+# ETAPA 1 & 2: LEXER & PARSER (Análise Léxica e Sintática com Lark)
+# ==============================================================================
+# - Etapa 1 (Lexer): Reconhecimento de tokens, identificadores, inteiros e símbolos.
+# - Etapa 2 (Parser): Construção da Árvore Sintática Abstrata (AST) via gramática EBNF.
+# ==============================================================================
 
-def simplify(cnf, literal):
-    neg = -literal
-    return [[l for l in c if l != neg] for c in cnf if literal not in c]
+grammar = r"""
+    start: (formula (";"? formula)*)?
+
+    ?formula: formula_and
+    ?formula_and: formula_and _AND formula_not   -> f_and
+                | formula_not
+    ?formula_not: _NOT formula_not               -> f_not
+                | "distinct" "(" term ("," term)* ")" -> distinct
+                | "(" formula ")"
+                | atom
+
+    ?atom: term "<=" term                        -> le
+         | term ">=" term                        -> ge
+         | term "!=" term                        -> neq
+         | term ("=" | "==") term                -> eq
+         | term "<" term                         -> lt
+         | term ">" term                         -> gt
+         | term "[" INT "]"                      -> bit_select
+         | CNAME                                 -> bool_var
+
+    ?term: ternary
+    ?ternary: term_or "?" term ":" ternary       -> mux
+            | term_or
+
+    ?term_or: term_or ("|" | "OR"i) term_xor     -> b_or
+            | term_xor
+
+    ?term_xor: term_xor ("⊕" | "^" | "XOR"i) term_and -> b_xor
+             | term_and
+
+    ?term_and: term_and ("&" | "AND"i) term_concat    -> b_and
+             | term_concat
+
+    ?term_concat: term_concat ("◦" | "++") term_shift -> concat
+                | term_shift
+
+    ?term_shift: term_shift "<<" term_add        -> shl
+               | term_shift ">>" term_add        -> shr
+               | term_add
+
+    ?term_add: term_add "+" term_mul             -> add
+             | term_add ("−" | "-") term_mul     -> sub
+             | term_mul
+
+    ?term_mul: term_mul ("·" | "*") term_unary   -> mul
+             | term_mul "/" term_unary           -> div
+             | term_unary
+
+    ?term_unary: ("∼" | "~") term_unary          -> b_not
+               | postfix
+
+    ?postfix: postfix "[" INT ":" INT "]"        -> slice
+            | "ext" "(" term ")"                 -> ext
+            | primary
+
+    ?primary: CNAME                              -> var
+            | INT                                -> const
+            | "(" term ")"
+
+    _AND: "∧" | "/\\" | "AND"i
+    _NOT: "¬" | "!" | "NOT"i
+
+    COMMENT: /#[^\n]*/ | /\/\/[^\n]*/
+    %ignore COMMENT
+
+    %import common.CNAME
+    %import common.INT
+    %import common.WS
+    %ignore WS
+"""
+
+parser = Lark(grammar, parser="earley")
 
 
-def get_variables(cnf):
-    return {abs(l) for c in cnf for l in c}
-
-
-def dpll(cnf, assignment=None, all_vars=None):
-    assignment = {} if assignment is None else assignment.copy()
-    if all_vars is None:
-        all_vars = get_variables(cnf)
-
-    while True:
-        if any(len(c) == 0 for c in cnf):
-            return False, None
-        if not cnf:
-            for v in all_vars:
-                assignment.setdefault(v, 0)
-            return True, assignment
-
-        unit = next((c for c in cnf if len(c) == 1), None)
-        if unit:
-            lit = unit[0]
-            assignment[abs(lit)] = 1 if lit > 0 else 0
-            cnf = simplify(cnf, lit)
-            continue
-
-        lits = {l for c in cnf for l in c}
-        pure = {l for l in lits if -l not in lits}
-        if pure:
-            for lit in pure:
-                assignment[abs(lit)] = 1 if lit > 0 else 0
-            cnf = [c for c in cnf if not any(l in pure for l in c)]
-            continue
-        break
-
-    if any(len(c) == 0 for c in cnf):
-        return False, None
-    if not cnf:
-        for v in all_vars:
-            assignment.setdefault(v, 0)
-        return True, assignment
-
-    branch = sorted(v for v in all_vars if v not in assignment)[0]
-    sat, model = dpll(simplify(cnf, branch), {**assignment, branch: 1}, all_vars)
-    return (True, model) if sat else dpll(simplify(cnf, -branch), {**assignment, branch: 0}, all_vars)
-
-
-# ==========================================
-# 2. BIT-BLASTER
-# ==========================================
+# ==============================================================================
+# ETAPA 3: BIT-BLASTING (Circuitos Booleanos + Codificação Tseitin para CNF)
+# ==============================================================================
+# - BitBlaster: Cria circuitos a nível de bit (Full-Adders, comparadores, portas)
+#   e gera cláusulas CNF usando a transformação de Tseitin.
+# - BitBlastTransformer: Percorre a AST produzida pelo Parser e traduz cada
+#   operação em variáveis booleanas e cláusulas CNF correspondentes.
+# ==============================================================================
 
 class BitBlaster:
     def __init__(self, width=4):
@@ -160,82 +192,6 @@ class BitBlaster:
 
     def b_mux(self, cond, then_t, else_t):
         return [self.or_gate(self.and_gate(cond, then_t[i]), self.and_gate(-cond, else_t[i])) for i in range(self.width)]
-
-
-# ==========================================
-# 3. GRAMATICA LARK & TRANSFORMER
-# ==========================================
-
-grammar = r"""
-    start: (formula (";"? formula)*)?
-
-    ?formula: formula_and
-    ?formula_and: formula_and _AND formula_not   -> f_and
-                | formula_not
-    ?formula_not: _NOT formula_not               -> f_not
-                | "distinct" "(" term ("," term)* ")" -> distinct
-                | "(" formula ")"
-                | atom
-
-    ?atom: term "<=" term                        -> le
-         | term ">=" term                        -> ge
-         | term "!=" term                        -> neq
-         | term ("=" | "==") term               -> eq
-         | term "<" term                        -> lt
-         | term ">" term                        -> gt
-         | term "[" INT "]"                     -> bit_select
-         | CNAME                                -> bool_var
-
-    ?term: ternary
-    ?ternary: term_or "?" term ":" ternary      -> mux
-            | term_or
-
-    ?term_or: term_or ("|" | "OR"i) term_xor     -> b_or
-            | term_xor
-
-    ?term_xor: term_xor ("⊕" | "^" | "XOR"i) term_and -> b_xor
-             | term_and
-
-    ?term_and: term_and ("&" | "AND"i) term_concat    -> b_and
-             | term_concat
-
-    ?term_concat: term_concat ("◦" | "++") term_shift -> concat
-                | term_shift
-
-    ?term_shift: term_shift "<<" term_add       -> shl
-               | term_shift ">>" term_add       -> shr
-               | term_add
-
-    ?term_add: term_add "+" term_mul            -> add
-             | term_add ("−" | "-") term_mul    -> sub
-             | term_mul
-
-    ?term_mul: term_mul ("·" | "*") term_unary  -> mul
-             | term_mul "/" term_unary          -> div
-             | term_unary
-
-    ?term_unary: ("∼" | "~") term_unary         -> b_not
-               | postfix
-
-    ?postfix: postfix "[" INT ":" INT "]"       -> slice
-            | "ext" "(" term ")"                -> ext
-            | primary
-
-    ?primary: CNAME                             -> var
-            | INT                               -> const
-            | "(" term ")"
-
-    _AND: "∧" | "/\\" | "AND"i
-    _NOT: "¬" | "!" | "NOT"i
-
-    COMMENT: /#[^\n]*/ | /\/\/[^\n]*/
-    %ignore COMMENT
-
-    %import common.CNAME
-    %import common.INT
-    %import common.WS
-    %ignore WS
-"""
 
 
 class BitBlastTransformer(Transformer):
@@ -336,12 +292,75 @@ class BitBlastTransformer(Transformer):
         raise NotImplementedError("Operador 'ext' ainda não implementado")
 
 
-parser = Lark(grammar, parser="earley")
+# ==============================================================================
+# ETAPA 4: SAT SOLVER (Motor DPLL - Davis-Putnam-Logemann-Loveland)
+# ==============================================================================
+# - simplify: Simplifica a CNF atribuindo um literal (eliminação de cláusulas e literais falsos)
+# - get_variables: Extrai todas as variáveis proposicionais presentes na CNF
+# - dpll: Algoritmo de decisão SAT com Unit Propagation, Pure Literal Elimination e Branching
+# ==============================================================================
+
+def simplify(cnf, literal):
+    neg = -literal
+    return [[l for l in c if l != neg] for c in cnf if literal not in c]
 
 
-# ==========================================
-# 4. SOLVER & MAIN
-# ==========================================
+def get_variables(cnf):
+    return {abs(l) for c in cnf for l in c}
+
+
+def dpll(cnf, assignment=None, all_vars=None):
+    assignment = {} if assignment is None else assignment.copy()
+    if all_vars is None:
+        all_vars = get_variables(cnf)
+
+    # Propagação unitária e eliminação de literais puros
+    while True:
+        if any(len(c) == 0 for c in cnf):
+            return False, None
+        if not cnf:
+            for v in all_vars:
+                assignment.setdefault(v, 0)
+            return True, assignment
+
+        # Regra 1: Unit Propagation
+        unit = next((c for c in cnf if len(c) == 1), None)
+        if unit:
+            lit = unit[0]
+            assignment[abs(lit)] = 1 if lit > 0 else 0
+            cnf = simplify(cnf, lit)
+            continue
+
+        # Regra 2: Pure Literal Elimination
+        lits = {l for c in cnf for l in c}
+        pure = {l for l in lits if -l not in lits}
+        if pure:
+            for lit in pure:
+                assignment[abs(lit)] = 1 if lit > 0 else 0
+            cnf = [c for c in cnf if not any(l in pure for l in c)]
+            continue
+        break
+
+    if any(len(c) == 0 for c in cnf):
+        return False, None
+    if not cnf:
+        for v in all_vars:
+            assignment.setdefault(v, 0)
+        return True, assignment
+
+    # Regra 3: Branching / Decisão com Backtracking
+    branch = sorted(v for v in all_vars if v not in assignment)[0]
+    sat, model = dpll(simplify(cnf, branch), {**assignment, branch: 1}, all_vars)
+    return (True, model) if sat else dpll(simplify(cnf, -branch), {**assignment, branch: 0}, all_vars)
+
+
+# ==============================================================================
+# ETAPA 5: RECONSTRUÇÃO DO MODELO & PIPELINE PRINCIPAL (Saída)
+# ==============================================================================
+# - solve: Orquestra a leitura da entrada, dedução da largura de bits, invocação do
+#          parser, bit-blaster e DPLL, e formata o resultado conforme a especificação.
+# - main: Lê a entrada padrão (stdin) e executa o solver.
+# ==============================================================================
 
 def solve(text: str):
     raw_lines = text.strip().splitlines()
@@ -353,6 +372,7 @@ def solve(text: str):
     if not lines:
         return
 
+    # Inferência da largura em bits (bit-width)
     width = 4
     if lines[0].isdigit():
         width, lines = int(lines[0]), lines[1:]
@@ -364,6 +384,7 @@ def solve(text: str):
     bb = BitBlaster(width)
     transformer = BitBlastTransformer(bb)
 
+    # 1 & 2: Análise Léxica e Sintática (Lark) -> 3: Bit-Blasting
     try:
         tree = parser.parse("\n".join(lines))
         res = transformer.transform(tree)
@@ -373,6 +394,7 @@ def solve(text: str):
         sys.stderr.flush()
         return
 
+    # Adicionar as cláusulas de asserção da raiz
     if isinstance(res, list):
         for lit in res:
             if lit is not None:
@@ -380,11 +402,13 @@ def solve(text: str):
     elif res is not None:
         bb.clauses.append([res])
 
+    # 4: Execução do Motor DPLL
     sat, model = dpll(bb.clauses)
     if not sat:
         print("UNSAT")
         return
 
+    # 5: Reconstrução do Modelo (Saída padronizada)
     print("SAT")
     res_str = []
     for name in sorted(bb.vars):
