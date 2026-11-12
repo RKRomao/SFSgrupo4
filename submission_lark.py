@@ -1,3 +1,4 @@
+import os
 import re
 import sys
 from lark import Lark, Transformer
@@ -420,7 +421,25 @@ def solve(text: str):
 
 
 def main():
-    raw = sys.stdin.read().strip()
+    raw = ""
+    if len(sys.argv) > 1:
+        with open(sys.argv[1], "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+    elif not sys.stdin.isatty():
+        raw = sys.stdin.read().strip()
+    else:
+        # Se executado diretamente sem argumentos nem redirecionamento de stdin, usa futoshiki_3x3.txt por padrão
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        default_path = os.path.join(script_dir, "futoshiki_3x3.txt")
+        if os.path.exists(default_path):
+            with open(default_path, "r", encoding="utf-8") as f:
+                raw = f.read().strip()
+        elif os.path.exists("futoshiki_3x3.txt"):
+            with open("futoshiki_3x3.txt", "r", encoding="utf-8") as f:
+                raw = f.read().strip()
+        else:
+            raw = sys.stdin.read().strip()
+
     if raw:
         solve(raw)
 
